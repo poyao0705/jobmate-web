@@ -1,12 +1,11 @@
 import { createApi } from '@reduxjs/toolkit/query/react';
-import type { GapGetByJobResponse } from '@/schemas/api';
+import type { GapAnalysis, GapGetByJobResponse } from '@/schemas/api';
 import { GapGetByJobResponseSchema } from '@/schemas/api';
 import { createBackendBaseQuery } from './baseQuery';
 
 interface GapRunResponse {
-	gap_report_id: number;
-	score?: number;
-	report_md?: string;
+	gap_report_id: number | null;
+	analysis?: GapAnalysis | null;
 }
 
 

@@ -27,6 +27,11 @@ export async function POST(request: NextRequest) {
 	const tag = `gap-report-${jobId}`;
 	revalidateTag(tag);
 
-	return NextResponse.json({ revalidated: true, tag });
+	// Return jobId so client-side handlers can use it for RTK Query cache invalidation
+	return NextResponse.json({ 
+		revalidated: true, 
+		tag,
+		jobId: typeof jobId === 'string' ? parseInt(jobId, 10) : jobId 
+	});
 }
 

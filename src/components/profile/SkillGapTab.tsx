@@ -24,10 +24,13 @@ import {
 	useGetGapByJobQuery,
 	useDeleteGapByJobMutation,
 	gapApi,
+	jobCollectionsApi,
 	useAppSelector,
+	useAppDispatch,
 } from "@/store";
+import { shallowEqual } from "react-redux";
 
-import type { GapGetByJobResponse, Job } from "@/schemas/api";
+import type { GapAnalysis, GapGetByJobResponse, Job } from "@/schemas/api";
 
 import { revalidateSavedJobs } from "@/app/actions/skill-gaps";
 
@@ -96,6 +99,8 @@ type SkillMatch = {
 
 	skill_id?: string | number;
 
+	skill_type?: string;
+
 	metadata?: SkillMatchMetadata;
 };
 
@@ -125,7 +130,8 @@ type SkillObject = {
 	[token: string]: unknown;
 };
 
-type SkillEntry = string | SkillObject | undefined | null;
+type CanonicalSkill = GapAnalysis["matched_skills"][number];
+type SkillEntry = string | SkillObject | CanonicalSkill | undefined | null;
 
 // create a function that returns the empty component
 
@@ -159,8 +165,16 @@ const EmptyComponent = () => {
 	);
 };
 
+function isCanonicalSkill(skill: SkillEntry): skill is CanonicalSkill {
+	return typeof skill === "object" && skill !== null && "descriptor" in skill;
+}
+
 function isSkillObject(skill: SkillEntry): skill is SkillObject {
-	return typeof skill === "object" && skill !== null;
+	return (
+		typeof skill === "object" &&
+		skill !== null &&
+		!isCanonicalSkill(skill)
+	);
 }
 
 function getSkillLabel(skill: SkillEntry): string {
@@ -168,6 +182,19 @@ function getSkillLabel(skill: SkillEntry): string {
 
 	if (typeof skill === "string") {
 		return skill.trim() || "Unknown skill";
+	}
+
+	if (isCanonicalSkill(skill)) {
+		const descriptor = skill.descriptor || {};
+		const raw = (descriptor as { raw?: Record<string, unknown> }).raw || {};
+		const displayAlias = typeof raw.alias === "string" ? raw.alias.trim() : "";
+		return (
+			(descriptor.name && descriptor.name.trim()) ||
+			(displayAlias || "") ||
+			descriptor.skill_id ||
+			skill.source_token ||
+			"Unknown skill"
+		);
 	}
 
 	if (isSkillObject(skill)) {
@@ -278,6 +305,8 @@ function SkillListSection({
 	emptyText,
 
 	badgeVariant,
+
+	showLevels = false,
 }: {
 	title: string;
 
@@ -286,6 +315,8 @@ function SkillListSection({
 	emptyText: string;
 
 	badgeVariant?: "default" | "secondary" | "destructive" | "outline";
+
+	showLevels?: boolean;
 }) {
 	return (
 		<section className="space-y-2">
@@ -297,50 +328,79 @@ function SkillListSection({
 				<div className="flex flex-wrap gap-2 text-brand-secondary font-sans text-sm">
 					{items.map((skill, idx) => {
 						const label = getSkillLabel(skill);
-
 						const skillObj = isSkillObject(skill) ? skill : undefined;
+						const canonicalSkill = isCanonicalSkill(skill) ? skill : undefined;
 
-						const delta =
-							typeof skillObj?.level_delta === "number"
-								? skillObj.level_delta
-								: undefined;
-
-						const levelTag =
-							typeof delta === "number" && delta > 0
-								? ` (−${delta.toFixed(1)} lvl)`
-								: "";
+						const levelDeltaRaw =
+							canonicalSkill?.level_delta ??
+							(skillObj?.level_delta as number | undefined);
+						const levelDelta =
+							typeof levelDeltaRaw === "number" ? levelDeltaRaw : undefined;
 
 						const match = skillObj?.match;
+						const descriptor = canonicalSkill?.descriptor;
 
-						const metadata = match?.metadata;
+						const onetName = canonicalSkill
+							? descriptor?.name
+							: match?.name || match?.metadata?.name;
 
-						const onetName = match?.name || metadata?.name;
-
-						const onetId = (
-							metadata?.external_id ||
-							match?.skill_id ||
-							metadata?.skill_id ||
-							""
-						).toString();
+						const onetId = canonicalSkill
+							? (descriptor?.external_id || descriptor?.skill_id || "")
+							: (
+								match?.skill_id ||
+								match?.metadata?.skill_id ||
+								""
+							).toString();
 
 						const metaParts: string[] = [];
 
-						if (metadata?.category) metaParts.push(metadata.category);
+						const showMetadata = !canonicalSkill;
 
-						if (metadata?.framework) metaParts.push(metadata.framework);
+						if (!canonicalSkill) {
+							const metadata = match?.metadata;
+							if (metadata?.category) metaParts.push(metadata.category);
+							if (metadata?.framework) metaParts.push(metadata.framework);
+							if (metadata?.aliases)
+								metaParts.push(`Aliases: ${metadata.aliases}`);
+							if (metadata?.version)
+								metaParts.push(`Version ${metadata.version}`);
+						}
 
-						if (metadata?.aliases)
-							metaParts.push(`Aliases: ${metadata.aliases}`);
+						const description = showMetadata
+							? match?.metadata?.description || match?.metadata?.short_description
+							: undefined;
 
-						if (metadata?.version)
-							metaParts.push(`Version ${metadata.version}`);
+						const isHotTech = canonicalSkill
+							? canonicalSkill.tags?.hot_tech === true
+							: skillObj?.is_hot_tech === true;
+						const isInDemand = canonicalSkill
+							? canonicalSkill.tags?.in_demand === true
+							: skillObj?.is_in_demand === true;
 
-						const description =
-							metadata?.description || metadata?.short_description;
+						const isOptional = canonicalSkill
+							? canonicalSkill.is_required === false
+							: skillObj?.is_required === false;
 
-						// Check for hot tech / in-demand flags
-						const isHotTech = skillObj?.is_hot_tech === true;
-						const isInDemand = skillObj?.is_in_demand === true;
+						const candidateLevel = canonicalSkill?.candidate_level ||
+							(skillObj?.candidate_level as Record<string, unknown> | undefined);
+						const requiredLevel = canonicalSkill?.required_level ||
+							(skillObj?.required_level as Record<string, unknown> | undefined);
+
+						const formatLevelInfo = (
+							prefix: string,
+							level: Record<string, unknown> | undefined
+						) => {
+							if (!level) return "";
+							const levelLabel = (level.label as string | undefined) ?? "unknown";
+							const rawScore = level.score as number | undefined;
+							const scoreValue =
+								typeof rawScore === "number" ? rawScore : Number(rawScore ?? 0);
+							const yearsValue = level.years as number | undefined;
+							return `\n  ${prefix}: ${levelLabel} (${scoreValue.toFixed(1)}/4.0)` +
+								(yearsValue !== undefined && yearsValue !== null
+									? ` - ${yearsValue}+ years`
+									: "");
+						};
 
 						return (
 							<div
@@ -359,7 +419,9 @@ function SkillListSection({
 										>
 											{label}
 
-											{levelTag}
+											{typeof levelDelta === "number" && levelDelta > 0
+												? ` (−${levelDelta.toFixed(1)} lvl)`
+												: ""}
 										</Badge>
 									</HoverInfo>
 
@@ -382,23 +444,39 @@ function SkillListSection({
 									)}
 								</div>
 
-								{onetName ? (
+						{showMetadata && onetName ? (
 									<p className="pl-1 text-[11px] text-brand-secondary">
 										O*NET: {onetName}
 									</p>
 								) : null}
 
-								{description ? (
+						{showMetadata && description ? (
 									<p className="pl-1 text-[11px] text-brand-secondary/80">
 										{description}
 									</p>
 								) : null}
 
-								{metaParts.length > 0 ? (
+						{showMetadata && metaParts.length > 0 ? (
 									<p className="pl-1 text-[10px] uppercase tracking-wide text-brand-secondary/70">
 										{metaParts.join(" · ")}
 									</p>
 								) : null}
+
+						{showLevels ? (
+									<p className="whitespace-pre-wrap pl-1 text-[11px] text-brand-secondary">
+										{formatLevelInfo("Candidate Level", candidateLevel)}
+										{formatLevelInfo("Required Level", requiredLevel)}
+										{typeof levelDelta === "number" && levelDelta > 0.25
+											? `\n  ⚠️  Level Gap: ${levelDelta.toFixed(1)} points below required`
+											: ""}
+									</p>
+								) : null}
+
+						{isOptional ? (
+							<p className="pl-1 text-[10px] uppercase tracking-wide text-brand-secondary/70">
+								(optional)
+							</p>
+						) : null}
 							</div>
 						);
 					})}
@@ -448,14 +526,41 @@ function GapDetailOverlay({
 	});
 
 	// Get all skills
-	const allMatched = gap?.matched_skills || [];
-	const allMissing = gap?.missing_skills || [];
-	const resumeSkills = gap?.resume_skills || [];
+	const analysis = gap?.analysis;
+	const allMatched: SkillEntry[] = (analysis?.matched_skills || []) as SkillEntry[];
+	const allMissing: SkillEntry[] = (analysis?.missing_skills || []) as SkillEntry[];
+	const resumeSkills: SkillEntry[] = (analysis?.resume_skills || []) as SkillEntry[];
+	const dedupedResumeSkills = useMemo(() => {
+		const seen = new Set<string>();
+		return resumeSkills.filter((skill) => {
+			const canonical = isCanonicalSkill(skill) ? skill : undefined;
+			const legacy = isSkillObject(skill) ? skill : undefined;
+			const identifier = canonical
+				? canonical.descriptor?.skill_id ||
+				  canonical.descriptor?.name ||
+				  canonical.source_token ||
+				  ""
+				: (legacy?.match?.skill_id as string | undefined) ||
+				  (legacy?.match?.name as string | undefined) ||
+				  "";
+			if (!identifier) {
+				return true;
+			}
+			if (seen.has(identifier)) {
+				return false;
+			}
+			seen.add(identifier);
+			return true;
+		});
+	}, [resumeSkills]);
 
 	// Filter matched skills by status
 	const matchedUnderqualified = useMemo(
 		() =>
 			allMatched.filter((skill) => {
+				if (isCanonicalSkill(skill)) {
+					return skill.status === "underqualified";
+				}
 				const skillObj = isSkillObject(skill) ? skill : undefined;
 				return skillObj?.status === "underqualified";
 			}),
@@ -465,26 +570,35 @@ function GapDetailOverlay({
 	const matchedMeetsOrExceeds = useMemo(
 		() =>
 			allMatched.filter((skill) => {
+				if (isCanonicalSkill(skill)) {
+					return (
+						skill.status === "meets_or_exceeds" ||
+						skill.status === undefined
+					);
+				}
 				const skillObj = isSkillObject(skill) ? skill : undefined;
 				return (
 					!skillObj ||
 					skillObj.status === "meets_or_exceeds" ||
 					!skillObj.status
 				);
-
 			}),
 		[allMatched]
 	);
 
 	const reportHtml = useMemo(() => {
-		if (!gap?.report_md) {
+		const markdown = analysis?.report_markdown || null;
+		if (!markdown) {
 			return null;
 		}
 
-		const html = marked.parse(gap.report_md, { async: false }) as string;
+		const html = marked.parse(markdown, { async: false }) as string;
 
 		return DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
-	}, [gap?.report_md]);
+	}, [analysis?.report_markdown]);
+
+	const overallScore = analysis?.metrics?.overall_score ?? 0;
+	const overallPercent = Math.round(overallScore * 10);
 
 	return (
 		<AnimatePresence>
@@ -518,7 +632,7 @@ function GapDetailOverlay({
 
 							<div className="flex flex-wrap gap-2 text-xs font-medium text-brand-secondary">
 								<span className="rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-brand-primary">
-									Overall match {Math.round((gap?.score || 0) * 10)}%
+								Overall match {overallPercent}%
 								</span>
 
 								<span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-emerald-800">
@@ -622,7 +736,7 @@ function GapDetailOverlay({
 										title="Underqualified Skills (Present but Below Required Level)"
 										items={matchedUnderqualified}
 										emptyText=""
-										badgeVariant="secondary"
+						badgeVariant="secondary"
 									/>
 								) : null}
 
@@ -632,7 +746,7 @@ function GapDetailOverlay({
 										title="Skills Meeting Requirements"
 										items={matchedMeetsOrExceeds}
 										emptyText=""
-										badgeVariant="secondary"
+						badgeVariant="secondary"
 									/>
 								) : null}
 
@@ -644,7 +758,7 @@ function GapDetailOverlay({
 										title="Matched skills"
 										items={allMatched}
 										emptyText="No overlapping skills detected yet."
-										badgeVariant="secondary"
+						badgeVariant="secondary"
 									/>
 								) : null}
 
@@ -658,9 +772,9 @@ function GapDetailOverlay({
 								{/* Resume Skills */}
 								<SkillListSection
 									title="Skills Detected in Your Profile"
-									items={resumeSkills}
+					items={dedupedResumeSkills}
 									emptyText="No skills detected in your profile yet."
-									badgeVariant="default"
+				badgeVariant="default"
 								/>
 
 								{/* Detailed Analysis */}
@@ -728,31 +842,85 @@ export default function SkillGapTab() {
 	);
 
 	// Get gap data for ready jobs (for rendering)
+	// Memoize the job IDs to avoid recreating the selector unnecessarily
+	const readyJobIds = useMemo(
+		() => displayJobs.filter((job) => job.gap_state === "ready").map((job) => job.id),
+		[displayJobs]
+	);
 
-	const jobGaps = useAppSelector((state) => {
-		const gaps: Record<number, GapGetByJobResponse | undefined> = {};
+	const dispatch = useAppDispatch();
 
-		displayJobs.forEach((job) => {
-			if (job.gap_state !== "ready") {
-				return;
+	// Pre-fetch gap data for all ready jobs automatically
+	useEffect(() => {
+		if (readyJobIds.length === 0) return;
+
+		// Pre-fetch gap data for all ready jobs
+		// RTK Query will automatically deduplicate requests for the same jobId
+		readyJobIds.forEach((jobId) => {
+			dispatch(gapApi.endpoints.getGapByJob.initiate(jobId, { forceRefetch: false }));
+		});
+	}, [readyJobIds, dispatch]);
+
+	// Use shallowEqual to prevent rerenders when object structure is the same
+	const jobGaps = useAppSelector(
+		(state) => {
+			const gaps: Record<number, GapGetByJobResponse | undefined> = {};
+			readyJobIds.forEach((jobId) => {
+				const queryState = gapApi.endpoints.getGapByJob.select(jobId)(state);
+				if (queryState?.data !== undefined) {
+					gaps[jobId] = queryState.data;
+				}
+			});
+			return gaps;
+		},
+		shallowEqual
+	);
+
+	// Track previous job states to detect status changes from "generating" to "ready"
+	const prevJobStatesRef = useRef<Map<number, string | undefined>>(new Map());
+
+	// Detect status changes and invalidate RTK Query cache when a job transitions from "generating" to "ready"
+	useEffect(() => {
+		const currentStates = new Map(
+			displayJobs.map((job) => [job.id, job.gap_state])
+		);
+		const prevStates = prevJobStatesRef.current;
+
+		// Find jobs that transitioned from "generating" to "ready"
+		const newlyReadyJobIds: number[] = [];
+		currentStates.forEach((currentState, jobId) => {
+			const prevState = prevStates.get(jobId);
+			if (prevState === "generating" && currentState === "ready") {
+				newlyReadyJobIds.push(jobId);
 			}
-
-			const queryState = gapApi.endpoints.getGapByJob.select(job.id)(state);
-
-			gaps[job.id] = queryState?.data;
 		});
 
-		return gaps;
-	});
+		// If any jobs became ready, invalidate cache and refetch immediately
+		if (newlyReadyJobIds.length > 0) {
+			// Invalidate RTK Query cache for both SavedJobs and GapByJob
+			dispatch(jobCollectionsApi.util.invalidateTags(["SavedJobs"]));
+			newlyReadyJobIds.forEach((jobId) => {
+				dispatch(
+					gapApi.util.invalidateTags([{ type: "GapByJob", id: jobId }])
+				);
+			});
+
+			// Trigger immediate refetch of saved jobs to get updated status
+			refetch();
+		}
+
+		// Update ref for next comparison
+		prevJobStatesRef.current = currentStates;
+	}, [displayJobs, dispatch, refetch]);
 
 	// Manual polling when there are generating reports
-
+	// Reduced interval to 3 seconds for better responsiveness
 	useEffect(() => {
 		if (!hasPending) return;
 
 		const id = setInterval(() => {
 			refetch();
-		}, 5000);
+		}, 3000);
 
 		return () => clearInterval(id);
 	}, [hasPending, refetch]);
@@ -897,11 +1065,15 @@ export default function SkillGapTab() {
 
 					const hasGap = isReady && jobGap?.exists === true;
 
-					const score = hasGap ? Math.round((jobGap?.score ?? 0) * 10) : 0;
-
-					const matchedCount = hasGap ? jobGap?.matched_skills?.length || 0 : 0;
-
-					const missingCount = hasGap ? jobGap?.missing_skills?.length || 0 : 0;
+					const jobAnalysis = jobGap?.analysis;
+					const overallScore = jobAnalysis?.metrics?.overall_score ?? 0;
+					const score = hasGap ? Math.round(overallScore * 10) : 0;
+					const matchedCount = hasGap
+						? jobAnalysis?.matched_skills?.length ?? 0
+						: 0;
+					const missingCount = hasGap
+						? jobAnalysis?.missing_skills?.length ?? 0
+						: 0;
 
 					const showCardSpinner = isGenerating || !hasGap;
 

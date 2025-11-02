@@ -11,7 +11,7 @@ import { z } from 'zod';
 
 export const UserContactInfoSchema = z.object({
   name: z.string(),
-  email: z.email("Invalid email format"),
+  email: z.string().email("Invalid email format"),
   phone_number: z.string(),
   location: z.string(),
 });
@@ -321,28 +321,95 @@ export type JobSavedStatus = z.infer<typeof JobSavedStatusSchema>;
 // Gap Analysis Schemas
 // ============================================================================
 
-const SkillEvidenceSchema = z
+const SkillEvidenceSchema = z.object({}).passthrough();
+
+const LevelSnapshotSchema = z
   .object({
-    skill_id: z.number().optional(),
-    name: z.string().optional(),
-    evidence: z.string().optional(),
-    level: z.number().optional(),
-    confidence: z.number().optional(),
+    label: z.string().optional().nullable(),
+    score: z.number().optional().nullable(),
+    years: z.number().optional().nullable(),
+    confidence: z.number().optional().nullable(),
+  })
+  .passthrough();
+
+const SkillDescriptorSchema = z
+  .object({
+    skill_id: z.string().optional().nullable(),
+    name: z.string().optional().nullable(),
+    skill_type: z.string().optional().nullable(),
+    framework: z.string().optional().nullable(),
+    external_id: z.string().optional().nullable(),
+    soc_code: z.string().optional().nullable(),
+    commodity_title: z.string().optional().nullable(),
+  })
+  .passthrough();
+
+const SkillTagsSchema = z.record(z.string(), z.boolean()).optional();
+
+const CanonicalSkillBaseSchema = z
+  .object({
+    descriptor: SkillDescriptorSchema,
+    source_token: z.string().optional().nullable(),
+    origin: z.enum(["resume", "job", "task", "derived"]).optional(),
+    job_score: z.number().optional().nullable(),
+    resume_score: z.number().optional().nullable(),
+    is_required: z.boolean().optional().nullable(),
+    tags: SkillTagsSchema,
+  })
+  .passthrough();
+
+const MatchedSkillCanonicalSchema = CanonicalSkillBaseSchema.extend({
+  status: z.enum(["meets_or_exceeds", "underqualified"]).optional(),
+  candidate_level: LevelSnapshotSchema.optional().nullable(),
+  required_level: LevelSnapshotSchema.optional().nullable(),
+  level_delta: z.number().optional().nullable(),
+});
+
+const MissingSkillCanonicalSchema = CanonicalSkillBaseSchema.extend({
+  status: z.literal("missing").optional(),
+});
+
+const ResumeSkillCanonicalSchema = CanonicalSkillBaseSchema.extend({
+  origin: z.literal("resume").optional(),
+  status: z.literal("resume_only").optional(),
+  candidate_level: LevelSnapshotSchema.optional().nullable(),
+});
+
+const GapMetricsSchema = z
+  .object({
+    overall_score: z.number().default(0),
+    overall_percent: z.number().optional().nullable(),
+    matched_skill_count: z.number().default(0),
+    missing_skill_count: z.number().default(0),
+    underqualified_skill_count: z.number().default(0),
+    resume_skill_count: z.number().default(0),
+    job_skill_count: z.number().optional().nullable(),
+  })
+  .passthrough();
+
+export const GapAnalysisSchema = z
+  .object({
+    version: z.string(),
+    analysis_id: z.number().optional().nullable(),
+    context: z.record(z.string(), z.any()).optional(),
+    metrics: GapMetricsSchema,
+    matched_skills: z.array(MatchedSkillCanonicalSchema).default([]),
+    missing_skills: z.array(MissingSkillCanonicalSchema).default([]),
+    resume_skills: z.array(ResumeSkillCanonicalSchema).default([]),
+    report_markdown: z.string().optional().nullable(),
+    diagnostics: z.record(z.string(), z.any()).optional(),
+    extras: z.record(z.string(), z.any()).optional(),
   })
   .passthrough();
 
 export const GapGetByJobResponseSchema = z.object({
   exists: z.boolean(),
   id: z.number().optional(),
-  score: z.number().optional(),
-  matched_skills: z.array(SkillEvidenceSchema).optional(),
-  missing_skills: z.array(SkillEvidenceSchema).optional(),
-  weak_skills: z.array(SkillEvidenceSchema).optional(),
-  resume_skills: z.array(SkillEvidenceSchema).optional(),
-  report_md: z.string().optional(),
+  analysis: GapAnalysisSchema.optional(),
 });
 
 export type SkillEvidence = z.infer<typeof SkillEvidenceSchema>;
+export type GapAnalysis = z.infer<typeof GapAnalysisSchema>;
 export type GapGetByJobResponse = z.infer<typeof GapGetByJobResponseSchema>;
 
 // ============================================================================
