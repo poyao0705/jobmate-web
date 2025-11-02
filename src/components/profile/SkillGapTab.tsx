@@ -120,6 +120,8 @@ type SkillObject = {
 
 	is_in_demand?: boolean; // New: flag for missing skills
 
+	is_required?: boolean; // New: flag for required vs nice-to-have skills
+
 	[token: string]: unknown;
 };
 
@@ -445,20 +447,12 @@ function GapDetailOverlay({
 		onClose();
 	});
 
-	// Filter matched skills by status (new structure)
+	// Get all skills
 	const allMatched = gap?.matched_skills || [];
-	const matchedMeetsOrExceeds = useMemo(
-		() =>
-			allMatched.filter((skill) => {
-				const skillObj = isSkillObject(skill) ? skill : undefined;
-				return (
-					!skillObj ||
-					skillObj.status === "meets_or_exceeds" ||
-					!skillObj.status
-				);
-			}),
-		[allMatched]
-	);
+	const allMissing = gap?.missing_skills || [];
+	const resumeSkills = gap?.resume_skills || [];
+
+	// Filter matched skills by status
 	const matchedUnderqualified = useMemo(
 		() =>
 			allMatched.filter((skill) => {
@@ -468,9 +462,19 @@ function GapDetailOverlay({
 		[allMatched]
 	);
 
-	const missing = gap?.missing_skills || [];
-	const weak = gap?.weak_skills || [];
-	const resumeSkills = gap?.resume_skills || [];
+	const matchedMeetsOrExceeds = useMemo(
+		() =>
+			allMatched.filter((skill) => {
+				const skillObj = isSkillObject(skill) ? skill : undefined;
+				return (
+					!skillObj ||
+					skillObj.status === "meets_or_exceeds" ||
+					!skillObj.status
+				);
+
+			}),
+		[allMatched]
+	);
 
 	const reportHtml = useMemo(() => {
 		if (!gap?.report_md) {
@@ -521,12 +525,8 @@ function GapDetailOverlay({
 									Matched {allMatched.length}
 								</span>
 
-								<span className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-amber-800">
-									Weak {weak.length}
-								</span>
-
 								<span className="rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-rose-800">
-									Missing {missing.length}
+									Missing {allMissing.length}
 								</span>
 							</div>
 
@@ -649,19 +649,13 @@ function GapDetailOverlay({
 								) : null}
 
 								<SkillListSection
-									title="Weak / optional skills"
-									items={weak}
-									emptyText="No optional or weak skills captured."
-									badgeVariant="outline"
-								/>
-
-								<SkillListSection
 									title="Missing skills"
-									items={missing}
+									items={allMissing}
 									emptyText="All required skills are currently covered."
 									badgeVariant="destructive"
 								/>
 
+								{/* Resume Skills */}
 								<SkillListSection
 									title="Skills Detected in Your Profile"
 									items={resumeSkills}
@@ -669,6 +663,7 @@ function GapDetailOverlay({
 									badgeVariant="default"
 								/>
 
+								{/* Detailed Analysis */}
 								{reportHtml ? (
 									<section className="space-y-2">
 										<h4 className="text-sm font-semibold text-brand-primary font-sans">
@@ -906,8 +901,6 @@ export default function SkillGapTab() {
 
 					const matchedCount = hasGap ? jobGap?.matched_skills?.length || 0 : 0;
 
-					const weakCount = hasGap ? jobGap?.weak_skills?.length || 0 : 0;
-
 					const missingCount = hasGap ? jobGap?.missing_skills?.length || 0 : 0;
 
 					const showCardSpinner = isGenerating || !hasGap;
@@ -1051,10 +1044,6 @@ export default function SkillGapTab() {
 											Matched {matchedCount}
 										</span>
 
-										<span className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-amber-800">
-											Weak {weakCount}
-										</span>
-
 										<span className="rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-rose-800">
 											Missing {missingCount}
 										</span>
@@ -1134,3 +1123,4 @@ export default function SkillGapTab() {
 		</div>
 	);
 }
+
