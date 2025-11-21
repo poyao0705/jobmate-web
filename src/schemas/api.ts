@@ -332,6 +332,17 @@ const LevelSnapshotSchema = z
   })
   .passthrough();
 
+const SkillAliasSchema = z
+  .object({
+    label: z.string().optional().nullable(),
+    alias_id: z.string().optional().nullable(),
+    source_framework: z.string().optional().nullable(),
+    relation_type: z.string().optional().nullable(),
+    similarity_score: z.number().optional().nullable(),
+    metadata: z.record(z.string(), z.any()).optional().nullable(),
+  })
+  .passthrough();
+
 const SkillDescriptorSchema = z
   .object({
     skill_id: z.string().optional().nullable(),
@@ -341,6 +352,7 @@ const SkillDescriptorSchema = z
     external_id: z.string().optional().nullable(),
     soc_code: z.string().optional().nullable(),
     commodity_title: z.string().optional().nullable(),
+    aliases: z.array(SkillAliasSchema).optional().default([]),
   })
   .passthrough();
 
