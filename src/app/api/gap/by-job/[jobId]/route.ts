@@ -4,60 +4,257 @@ import { auth0 } from "@/lib/auth0";
 export const runtime = "nodejs";
 
 const BACKEND_URL = process.env.BACKEND_URL || "http://127.0.0.1:5001";
+const UPSTREAM_TIMEOUT_MS = 30000; // 30 seconds
 
-async function getAccessToken() {
-	try {
-		const tokenRes = await auth0.getAccessToken({
-			refresh: true,
-			audience: process.env.AUTH0_AUDIENCE,
-			scope: process.env.AUTH0_SCOPE || "openid profile email",
-		} as { refresh?: boolean; audience?: string; scope?: string });
-		return tokenRes?.token ?? null;
-	} catch (error) {
-		console.warn("Failed to retrieve Auth0 token", error);
-		return null;
+/**
+ * Merge Set-Cookie headers from one response into another.
+ * Next.js/undici may expose getSetCookie(); fall back to single header.
+ * Uses proper type checking instead of 'any'.
+ */
+function mergeSetCookies(from: Headers, to: Headers) {
+	// Next.js Headers may have getSetCookie() method
+	const cookies: string[] =
+		"getSetCookie" in from && typeof (from as { getSetCookie?: () => string[] }).getSetCookie === "function"
+			? (from as { getSetCookie: () => string[] }).getSetCookie()
+			: from.get("set-cookie")
+				? [from.get("set-cookie") as string]
+				: [];
+
+	for (const c of cookies) {
+		to.append("set-cookie", c);
 	}
 }
 
+/**
+ * Sanitize request headers for upstream forwarding.
+ * Strips sensitive headers (cookies, authorization) and hop-by-hop headers.
+ * Only forwards safe, non-sensitive headers to prevent data leakage.
+ * 
+ * This follows the BFF pattern: client cookies (Auth0 session) are handled
+ * server-side via getSession(), and we inject our own bearer token.
+ */
+function sanitizeHeaders(req: NextRequest): Headers {
+	const safeHeaders = new Headers();
+
+	// Allowlist of safe headers to forward
+	const allowedHeaders = [
+		'content-type',
+		'accept',
+		'accept-language',
+		'accept-encoding',
+		'user-agent',
+		'x-requested-with',
+	];
+
+	// Copy only safe headers
+	allowedHeaders.forEach((header) => {
+		const value = req.headers.get(header);
+		if (value) {
+			safeHeaders.set(header, value);
+		}
+	});
+
+	return safeHeaders;
+}
+
+/**
+ * Add security headers to response.
+ * These headers help protect against common web vulnerabilities.
+ */
+function addSecurityHeaders(resp: NextResponse): void {
+	resp.headers.set('X-Content-Type-Options', 'nosniff');
+	resp.headers.set('X-Frame-Options', 'DENY');
+}
+
+/**
+ * Generate a request ID for tracing/logging.
+ */
+function generateRequestId(): string {
+	return `req_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+}
+
+/**
+ * Log error with context for debugging.
+ */
+function logError(requestId: string, context: string, error: unknown, additionalInfo?: Record<string, unknown>) {
+	const errorMessage = error instanceof Error ? error.message : String(error);
+	const errorStack = error instanceof Error ? error.stack : undefined;
+
+	console.error(`[${requestId}] ${context}:`, {
+		error: errorMessage,
+		stack: errorStack,
+		...additionalInfo,
+	});
+}
+
+/**
+ * Create a fetch with timeout using AbortController.
+ */
+async function fetchWithTimeout(
+	url: string,
+	options: RequestInit,
+	timeoutMs: number
+): Promise<Response> {
+	const controller = new AbortController();
+	const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+	try {
+		const response = await fetch(url, {
+			...options,
+			signal: controller.signal,
+		});
+		return response;
+	} finally {
+		clearTimeout(timeoutId);
+	}
+}
+
+/**
+ * GET handler for gap report by job ID.
+ * Implements Backend-for-Frontend (BFF) pattern.
+ * 
+ * Security Model:
+ * - CSRF Protection: Auth0 SDK uses HttpOnly, SameSite cookies which provide CSRF protection.
+ *   The session cookie is not accessible to JavaScript (HttpOnly) and SameSite prevents
+ *   cross-site requests from including the cookie. This is the recommended approach for
+ *   cookie-based authentication in BFF patterns.
+ * 
+ * - Token Handling: Client never directly handles access tokens. Tokens are obtained
+ *   server-side via getAccessToken() and injected into upstream requests. Client cookies
+ *   (Auth0 session) are handled server-side and never forwarded to backend.
+ * 
+ * - Header Sanitization: Only safe headers are forwarded to upstream. Client cookies and
+ *   authorization headers are stripped to prevent data leakage and confusion.
+ */
 export async function GET(
-	_request: NextRequest,
+	req: NextRequest,
 	{ params }: { params: Promise<{ jobId: string }> }
 ) {
+	const requestId = generateRequestId();
+	const authRes = new NextResponse();
 	const { jobId } = await params;
-	const session = await auth0
-		.getSession()
-		.catch(() => {
-			console.warn("Session check failed");
-			return undefined;
-		});
 
-	if (!session) {
-		return NextResponse.json({ error: "No session found" }, { status: 401 });
+	// Validate jobId
+	if (!jobId || jobId.trim().length === 0) {
+		const resp = NextResponse.json(
+			{ error: "Invalid job ID", requestId },
+			{ status: 400 }
+		);
+		addSecurityHeaders(resp);
+		return resp;
 	}
 
-	const token = await getAccessToken();
-	if (!token) {
-		return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+	// Check session
+	// CSRF protection: Auth0 SDK uses HttpOnly, SameSite cookies which provide
+	// CSRF protection. The session cookie is not accessible to JavaScript and
+	// SameSite prevents cross-site requests from including the cookie.
+	let session = null;
+	try {
+		session = await auth0.getSession(req);
+	} catch (error) {
+		logError(requestId, "Session retrieval failed", error);
+		const resp = NextResponse.json(
+			{ error: "Authentication failed", requestId },
+			{ status: 401 }
+		);
+		addSecurityHeaders(resp);
+		return resp;
+	}
+
+	if (!session) {
+		const resp = NextResponse.json(
+			{ error: "No session found", requestId },
+			{ status: 401 }
+		);
+		addSecurityHeaders(resp);
+		return resp;
+	}
+
+	// Get access token
+	let bearer: string | undefined;
+	try {
+		const tokenRes = await auth0.getAccessToken(req, authRes, {
+			refresh: true,
+		});
+		bearer = tokenRes?.token;
+	} catch (error) {
+		logError(requestId, "Token retrieval failed", error);
+		const resp = NextResponse.json(
+			{ error: "Failed to obtain access token", requestId },
+			{ status: 401 }
+		);
+		mergeSetCookies(authRes.headers, resp.headers);
+		addSecurityHeaders(resp);
+		return resp;
+	}
+
+	if (!bearer) {
+		const resp = NextResponse.json(
+			{ error: "Unauthorized: no access token", requestId },
+			{ status: 401 }
+		);
+		mergeSetCookies(authRes.headers, resp.headers);
+		addSecurityHeaders(resp);
+		return resp;
 	}
 
 	const targetUrl = `${BACKEND_URL}/api/gap/by-job/${jobId}`;
 
 	try {
-		const upstream = await fetch(targetUrl, {
-			headers: {
-				Authorization: `Bearer ${token}`,
+		// Prepare headers: sanitize to strip cookies and client authorization
+		// This follows BFF pattern - Auth0 session cookies handled server-side,
+		// and we inject our own bearer token (not client's)
+		const headers = sanitizeHeaders(req);
+		headers.set("authorization", `Bearer ${bearer}`);
+		headers.set("x-request-id", requestId); // Add request ID for backend tracing
+
+		// Forward request with timeout
+		const upstream = await fetchWithTimeout(
+			targetUrl,
+			{
+				method: "GET",
+				headers,
+				next: { tags: [`gap-report-${jobId}`] },
 			},
-			next: { tags: [`gap-report-${jobId}`] },
-		});
+			UPSTREAM_TIMEOUT_MS
+		);
 
 		const data = await upstream.json().catch(() => null);
-		return NextResponse.json(data, { status: upstream.status });
+		const resp = NextResponse.json(data, { status: upstream.status });
+
+		// Persist Auth0 session/token updates
+		mergeSetCookies(authRes.headers, resp.headers);
+
+		// Add security headers
+		addSecurityHeaders(resp);
+
+		return resp;
 	} catch (error) {
-		console.error("Failed to fetch gap report", error);
-		return NextResponse.json(
-			{ error: "Failed to retrieve gap report" },
-			{ status: 502 }
+		const isTimeout = error instanceof Error && error.name === "AbortError";
+		const errorMessage = isTimeout
+			? `Upstream request timed out after ${UPSTREAM_TIMEOUT_MS}ms`
+			: error instanceof Error
+				? error.message
+				: "Unknown error occurred";
+
+		logError(requestId, "Upstream fetch failed", error, {
+			targetUrl,
+			method: "GET",
+			jobId,
+			isTimeout,
+		});
+
+		const resp = NextResponse.json(
+			{
+				error: isTimeout ? "Request timeout" : "Failed to retrieve gap report",
+				requestId,
+				...(process.env.NODE_ENV === "development" ? { detail: errorMessage } : {}),
+			},
+			{ status: isTimeout ? 504 : 502 }
 		);
+		mergeSetCookies(authRes.headers, resp.headers);
+		addSecurityHeaders(resp);
+		return resp;
 	}
 }
 
