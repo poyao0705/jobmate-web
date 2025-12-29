@@ -123,8 +123,22 @@ export const JobSchema = z.object({
   source: z.string().optional(),
   company_logo_url: z.string().optional(),
   company_website: z.string().nullable().optional(),
-  required_skills: z.array(z.string()).optional(),
-  preferred_skills: z.array(z.string()).optional(),
+  required_skills: z.preprocess(
+    (val) => {
+      if (typeof val === 'string') return val.split(',').map(s => s.trim()).filter(Boolean);
+      if (Array.isArray(val)) return val;
+      return undefined;
+    },
+    z.array(z.string()).optional()
+  ),
+  preferred_skills: z.preprocess(
+    (val) => {
+      if (typeof val === 'string') return val.split(',').map(s => s.trim()).filter(Boolean);
+      if (Array.isArray(val)) return val;
+      return undefined;
+    },
+    z.array(z.string()).optional()
+  ),
   is_active: z.boolean().optional(),
   is_remote: z.boolean().optional(),
   date_posted: z.string().optional(),
@@ -242,8 +256,8 @@ export const TaskSchema = z.object({
 });
 
 export const TasksResponseSchema = z.object({
-  tasks: z.array(TaskSchema),
-  goals: z.array(TaskGoalSchema),
+  tasks: z.array(TaskSchema).default([]),
+  goals: z.array(TaskGoalSchema).default([]),
 });
 
 export const TaskCreateRequestSchema = z.object({
@@ -297,8 +311,8 @@ export type CreateChatResponse = z.infer<typeof CreateChatResponseSchema>;
 // ============================================================================
 
 export const JobCollectionsResponseSchema = z.object({
-  jobs: z.array(JobSchema),
-  total_count: z.number(),
+  jobs: z.array(JobSchema).default([]),
+  total_count: z.number().default(0),
 });
 
 export const SaveJobResponseSchema = z.object({
@@ -308,8 +322,8 @@ export const SaveJobResponseSchema = z.object({
 });
 
 export const JobSavedStatusSchema = z.object({
-  job_id: z.number(),
-  saved: z.boolean(),
+  job_id: z.number().optional(),
+  saved: z.boolean().default(false),
   saved_at: z.string().optional().nullable(),
 });
 

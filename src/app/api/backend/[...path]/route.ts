@@ -171,58 +171,71 @@ async function proxy(req: NextRequest, path: string[]) {
 
   const sanitizedPath = pathValidation.sanitized!;
 
-  // Check session
-  // CSRF protection: Auth0 SDK uses HttpOnly, SameSite cookies which provide
-  // CSRF protection. The session cookie is not accessible to JavaScript and
-  // SameSite prevents cross-site requests from including the cookie.
-  let session = null;
-  try {
-    session = await auth0.getSession(req);
-  } catch (error) {
-    logError(requestId, "Session retrieval failed", error);
-    const resp = NextResponse.json(
-      { error: "Authentication failed", requestId },
-      { status: 401 }
-    );
-    addSecurityHeaders(resp);
-    return resp;
-  }
-
-  if (!session) {
-    const resp = NextResponse.json(
-      { error: "No session found", requestId },
-      { status: 401 }
-    );
-    addSecurityHeaders(resp);
-    return resp;
-  }
-
-  // Get access token
+  // DEV MODE: Skip auth when SKIP_AUTH_IN_DEV is set (for local development)
+  const skipAuth = process.env.SKIP_AUTH_IN_DEV === "true";
   let bearer: string | undefined;
-  try {
-    const tokenRes = await auth0.getAccessToken(req, authRes, {
-      refresh: true,
-    });
-    bearer = tokenRes?.token;
-  } catch (error) {
-    logError(requestId, "Token retrieval failed", error);
-    const resp = NextResponse.json(
-      { error: "Failed to obtain access token", requestId },
-      { status: 401 }
-    );
-    mergeSetCookies(authRes.headers, resp.headers);
-    addSecurityHeaders(resp);
-    return resp;
-  }
 
-  if (!bearer) {
-    const resp = NextResponse.json(
-      { error: "Unauthorized: no access token", requestId },
-      { status: 401 }
-    );
-    mergeSetCookies(authRes.headers, resp.headers);
-    addSecurityHeaders(resp);
-    return resp;
+  console.log(`[${requestId}] Auth Debug:`, {
+    skipAuth,
+    SKIP_AUTH_IN_DEV: process.env.SKIP_AUTH_IN_DEV,
+    NODE_ENV: process.env.NODE_ENV,
+  });
+
+  if (!skipAuth) {
+    // Check session
+    // CSRF protection: Auth0 SDK uses HttpOnly, SameSite cookies which provide
+    // CSRF protection. The session cookie is not accessible to JavaScript and
+    // SameSite prevents cross-site requests from including the cookie.
+    let session = null;
+    try {
+      session = await auth0.getSession(req);
+    } catch (error) {
+      logError(requestId, "Session retrieval failed", error);
+      const resp = NextResponse.json(
+        { error: "Authentication failed", requestId },
+        { status: 401 }
+      );
+      addSecurityHeaders(resp);
+      return resp;
+    }
+
+    if (!session) {
+      const resp = NextResponse.json(
+        { error: "No session found", requestId },
+        { status: 401 }
+      );
+      addSecurityHeaders(resp);
+      return resp;
+    }
+
+    // Get access token
+    try {
+      const tokenRes = await auth0.getAccessToken(req, authRes, {
+        refresh: true,
+      });
+      bearer = tokenRes?.token;
+    } catch (error) {
+      logError(requestId, "Token retrieval failed", error);
+      const resp = NextResponse.json(
+        { error: "Failed to obtain access token", requestId },
+        { status: 401 }
+      );
+      mergeSetCookies(authRes.headers, resp.headers);
+      addSecurityHeaders(resp);
+      return resp;
+    }
+
+    if (!bearer) {
+      const resp = NextResponse.json(
+        { error: "Unauthorized: no access token", requestId },
+        { status: 401 }
+      );
+      mergeSetCookies(authRes.headers, resp.headers);
+      addSecurityHeaders(resp);
+      return resp;
+    }
+  } else {
+    console.log(`[${requestId}] ⚠️  DEV MODE: Skipping Auth0 authentication`);
   }
 
   // Build target URL
@@ -233,7 +246,12 @@ async function proxy(req: NextRequest, path: string[]) {
     // This follows BFF pattern - Auth0 session cookies handled server-side,
     // and we inject our own bearer token (not client's)
     const headers = sanitizeHeaders(req);
-    headers.set("authorization", `Bearer ${bearer}`);
+    if (bearer) {
+      headers.set("authorization", `Bearer ${bearer}`);
+      console.log(`[${requestId}] ✅ Bearer token added to request (length: ${bearer.length})`);
+    } else {
+      console.log(`[${requestId}] ⚠️ No bearer token available - request will fail on backend`);
+    }
     headers.set("x-request-id", requestId); // Add request ID for backend tracing
 
     // Handle request body
@@ -260,6 +278,8 @@ async function proxy(req: NextRequest, path: string[]) {
     }
 
     // Forward request with timeout
+    console.log(`[${requestId}] 🚀 Proxying ${req.method} ${targetUrl}`);
+    
     const upstream = await fetchWithTimeout(
       targetUrl,
       {
@@ -270,6 +290,30 @@ async function proxy(req: NextRequest, path: string[]) {
       },
       UPSTREAM_TIMEOUT_MS
     );
+
+    console.log(`[${requestId}] ⬅️  Backend responded: ${upstream.status} ${upstream.statusText}`);
+    
+    // Log 404 errors with more detail
+    if (upstream.status === 404) {
+      console.error(`[${requestId}] ❌ 404 Not Found: ${req.method} ${targetUrl}`);
+      console.error(`[${requestId}] Original path: ${sanitizedPath.join("/")}`);
+      console.error(`[${requestId}] Query params: ${req.nextUrl.search}`);
+    }
+
+    // Log all non-2xx responses for debugging
+    if (upstream.status >= 400) {
+      console.error(`[${requestId}] ⚠️  Error response ${upstream.status} from backend`);
+      try {
+        const errorText = await upstream.text();
+        console.error(`[${requestId}] Error body:`, errorText);
+        const resp = new NextResponse(errorText, { status: upstream.status });
+        mergeSetCookies(authRes.headers, resp.headers);
+        addSecurityHeaders(resp);
+        return resp;
+      } catch (e) {
+        console.error(`[${requestId}] Could not read error body:`, e);
+      }
+    }
 
     const resp = new NextResponse(upstream.body, { status: upstream.status });
 

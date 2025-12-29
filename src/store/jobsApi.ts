@@ -68,10 +68,13 @@ export const jobsApi = createApi({
       },
       transformResponse: (response: unknown) => {
         try {
+          console.log('Raw backend response:', JSON.stringify(response, null, 2));
           return JobsResponseSchema.parse(response);
         } catch (error) {
           console.error('Jobs response validation failed:', error);
+          console.error('Response was:', response);
           if (error instanceof ZodError) {
+            console.error('Zod errors:', JSON.stringify(error.errors, null, 2));
             throw new Error(getZodErrorMessage(error));
           }
           throw error;

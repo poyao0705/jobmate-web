@@ -27,10 +27,26 @@ export const profileApi = createApi({
       query: () => 'contact-info',
       transformResponse: (response: unknown) => {
         try {
-          return UserContactInfoSchema.parse(response);
+          console.log('📥 [getContactInfo] Raw response:', response);
+          
+          // Backend returns contact_name, contact_email, etc. - need to transform
+          const data = response as any;
+          const transformed = {
+            name: data.contact_name || data.name || '',
+            email: data.contact_email || data.email || '',
+            phone_number: data.contact_phone_number || data.phone_number || '',
+            location: data.contact_location || data.location || ''
+          };
+          
+          console.log('🔄 [getContactInfo] Transformed:', transformed);
+          const validated = UserContactInfoSchema.parse(transformed);
+          console.log('✅ [getContactInfo] Validated successfully');
+          return validated;
         } catch (error) {
-          console.error('Contact info response validation failed:', error);
+          console.error('❌ [getContactInfo] Validation failed:', error);
+          console.error('❌ [getContactInfo] Response was:', response);
           if (error instanceof ZodError) {
+            console.error('❌ [getContactInfo] Zod errors:', error.errors);
             throw new Error(getZodErrorMessage(error));
           }
           throw error;
@@ -41,14 +57,39 @@ export const profileApi = createApi({
 
     // Update user contact information
     updateContactInfo: builder.mutation<UserContactInfo, UserContactInfo>({
-      query: (contactInfo) => ({
-        url: 'contact-info',
-        method: 'PUT',
-        body: contactInfo,
-      }),
+      query: (contactInfo) => {
+        console.log('📤 [updateContactInfo] Sending:', contactInfo);
+        // Transform to backend format
+        const backendFormat = {
+          contact_name: contactInfo.name,
+          contact_email: contactInfo.email,
+          contact_phone_number: contactInfo.phone_number,
+          contact_location: contactInfo.location
+        };
+        console.log('🔄 [updateContactInfo] Transformed for backend:', backendFormat);
+        return {
+          url: 'contact-info',
+          method: 'PUT',
+          body: backendFormat,
+        };
+      },
       transformResponse: (response: unknown) => {
         try {
-          return UserContactInfoSchema.parse(response);
+          console.log('📥 [updateContactInfo] Raw response:', response);
+          
+          // Backend returns contact_name, contact_email, etc. - need to transform back
+          const data = response as any;
+          const transformed = {
+            name: data.contact_name || data.name || '',
+            email: data.contact_email || data.email || '',
+            phone_number: data.contact_phone_number || data.phone_number || '',
+            location: data.contact_location || data.location || ''
+          };
+          
+          console.log('🔄 [updateContactInfo] Transformed:', transformed);
+          const validated = UserContactInfoSchema.parse(transformed);
+          console.log('✅ [updateContactInfo] Updated successfully');
+          return validated;
         } catch (error) {
           console.error('Update contact info response validation failed:', error);
           if (error instanceof ZodError) {
