@@ -119,7 +119,7 @@ export const JobSchema = z.object({
   salary_max: z.number().nullable().optional(),
   salary_currency: z.string().optional(),
   external_url: z.string().optional(),
-  external_id: z.string().optional(),
+  external_id: z.union([z.string(), z.number()]).transform(val => String(val)).optional(),
   source: z.string().optional(),
   company_logo_url: z.string().optional(),
   company_website: z.string().nullable().optional(),
